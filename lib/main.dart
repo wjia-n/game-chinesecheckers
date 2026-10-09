@@ -1,25 +1,60 @@
 import 'package:flutter/material.dart';
-import 'package:wajiha_game_core/wajiha_game_core.dart';
-import 'game_screen.dart';
+import 'package:flutter/services.dart';
+import 'audio/sound_engine.dart';
+import 'state/settings.dart';
+import 'theme/imperial.dart';
+import 'ui/menu_screen.dart';
 
-void main() => runApp(const ChineseCheckersApp());
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await SystemChrome.setPreferredOrientations([
+    DeviceOrientation.portraitUp,
+    DeviceOrientation.portraitDown,
+  ]);
+  final settings = AppSettings();
+  await settings.load();
+  final sound = SoundEngine();
+  await sound.init(
+    musicOn: settings.musicOn,
+    sfxOn: settings.sfxOn,
+    musicVolume: settings.musicVolume,
+    sfxVolume: settings.sfxVolume,
+  );
+  // Keep audio in sync when settings change from any screen.
+  settings.addListener(() {
+    sound.applySettings(
+      musicOn: settings.musicOn,
+      sfxOn: settings.sfxOn,
+      musicVolume: settings.musicVolume,
+      sfxVolume: settings.sfxVolume,
+    );
+  });
+  runApp(ChineseCheckersApp(settings: settings, sound: sound));
+}
 
 class ChineseCheckersApp extends StatelessWidget {
-  const ChineseCheckersApp({super.key});
+  final AppSettings settings;
+  final SoundEngine sound;
+
+  const ChineseCheckersApp(
+      {super.key, required this.settings, required this.sound});
 
   @override
   Widget build(BuildContext context) {
-    return GameShell(
-      variant: ShellVariant.retroCabinet,
+    return MaterialApp(
       title: 'Chinese Checkers',
-      tagline: 'Hop, skip and jump your marbles across the star! 🔮',
-      emoji: '🔮',
-      slug: 'chinesecheckers',
-      howToPlay:
-          '• Tap one of your glowing marbles, then tap a highlighted hole.\n• Move one step — or hop over marbles for a mega chain-jump!\n• Long hop chains in a single turn are totally legal. Go wild!\n• First to park all 10 marbles in the opposite star point wins. 🏆',
-      playerOptions: const [1, 2],
-      supportsBots: true,
-      gameBuilder: (ctx, players, cb) => ChineseCheckersScreen(players: players, callbacks: cb),
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        useMaterial3: true,
+        brightness: Brightness.dark,
+        scaffoldBackgroundColor: Imperial.silk,
+        colorScheme: const ColorScheme.dark(
+          primary: Imperial.cinnabar,
+          secondary: Imperial.gold,
+          surface: Imperial.silk,
+        ),
+      ),
+      home: MenuScreen(settings: settings, sound: sound),
     );
   }
 }
