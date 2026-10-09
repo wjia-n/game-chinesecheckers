@@ -532,6 +532,11 @@ class _MenuScreenState extends State<MenuScreen> {
                   borderSide: BorderSide(color: t.goldBright),
                 ),
               ),
+              // Save-on-keystroke already happens via the controller listener
+              // (_nameCtrl); this commits the final value on keyboard-done or
+              // any other focus-loss path.
+              onEditingComplete: () =>
+                  widget.settings.setPlayerName(seat, _nameCtrl(seat).text),
             ),
           ),
           const SizedBox(width: 8),

@@ -448,16 +448,30 @@ class _NameField extends StatefulWidget {
 
 class _NameFieldState extends State<_NameField> {
   late final TextEditingController _c;
+  late final FocusNode _focus;
 
   @override
   void initState() {
     super.initState();
     _c = TextEditingController(
         text: widget.settings.playerNames[widget.seat]);
+    // Focus-loss commit: persist the final value when the field is
+    // dismissed any way other than the keyboard "done" action (tapping
+    // elsewhere, back gesture, screen navigation). Belt-and-braces on top
+    // of the save-on-keystroke [onChanged] below.
+    _focus = FocusNode()
+      ..addListener(() {
+        if (!_focus.hasFocus) {
+          widget.settings.setPlayerName(widget.seat, _c.text);
+        }
+      });
   }
 
   @override
   void dispose() {
+    // Commit anything pending before the widget goes away.
+    widget.settings.setPlayerName(widget.seat, _c.text);
+    _focus.dispose();
     _c.dispose();
     super.dispose();
   }
@@ -467,6 +481,7 @@ class _NameFieldState extends State<_NameField> {
     final t = widget.theme;
     return TextField(
       controller: _c,
+      focusNode: _focus,
       style:
           TextStyle(fontFamily: 'serif', fontSize: 15, color: t.ivory),
       decoration: InputDecoration(
@@ -484,6 +499,7 @@ class _NameFieldState extends State<_NameField> {
         ),
       ),
       onChanged: (v) => widget.settings.setPlayerName(widget.seat, v),
+      onEditingComplete: () => widget.settings.setPlayerName(widget.seat, _c.text),
     );
   }
 }

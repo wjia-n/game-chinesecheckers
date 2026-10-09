@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../engine/game.dart';
@@ -17,7 +19,12 @@ class AppSettings extends ChangeNotifier {
   static const _kDifficulty = 'cc_ai_difficulty';
   static const _kForward = 'cc_forward_progress';
   static const _kSymmetric = 'cc_symmetric_variant';
-  static const _kNames = 'cc_player_names'; // StringList, 6 entries
+  static const _kNames = 'cc_player_names'; // legacy unordered StringSet key
+  /// Order-safe player-name storage: a single JSON string. Android's
+  /// SharedPreferences stores StringLists as an unordered StringSet, so the
+  /// old key scrambled name order on every app restart. Never use a
+  /// StringList for ordered data on Android.
+  static const _kNamesJson = 'chinesecheckers_player_names_json';
   static const _kTheme = 'cc_theme_id';
   static const _kStyle = 'cc_marble_style';
   static const _kAccent = 'cc_board_accent';
@@ -35,6 +42,26 @@ class AppSettings extends ChangeNotifier {
     'Ivory',
     'Ink',
   ];
+
+  /// Encode the 6 player names as one JSON string (order-preserving).
+  static String encodePlayerNames(List<String> names) => jsonEncode(names);
+
+  static String _cleanName(int i, Object? v) {
+    final s = v is String ? v.trim() : '';
+    return s.isEmpty ? defaultNames[i] : s;
+  }
+
+  /// Decode persisted names; falls back to defaults on missing/corrupt data.
+  static List<String> decodePlayerNames(String? raw) {
+    if (raw == null) return List.of(defaultNames);
+    try {
+      final d = jsonDecode(raw);
+      if (d is List && d.length == 6) {
+        return [for (int i = 0; i < 6; i++) _cleanName(i, d[i])];
+      }
+    } catch (_) {}
+    return List.of(defaultNames);
+  }
 
   bool musicOn = true;
   bool sfxOn = true;
@@ -72,12 +99,17 @@ class AppSettings extends ChangeNotifier {
         Difficulty.values[p.getInt(_kDifficulty) ?? Difficulty.lacquer.index];
     forwardProgress = p.getBool(_kForward) ?? true;
     symmetricVariant = p.getBool(_kSymmetric) ?? false;
-    final names = p.getStringList(_kNames);
-    if (names != null && names.length == 6) {
-      playerNames = [
-        for (int i = 0; i < 6; i++)
-          names[i].trim().isEmpty ? defaultNames[i] : names[i].trim()
-      ];
+    // Player names: prefer the order-safe JSON key. Fall back to the legacy
+    // StringList key once (one-time migration); it may already be scrambled
+    // on Android, which is exactly the bug this replaces.
+    final namesRaw = p.getString(_kNamesJson);
+    if (namesRaw != null) {
+      playerNames = decodePlayerNames(namesRaw);
+    } else {
+      final legacy = p.getStringList(_kNames);
+      playerNames = (legacy != null && legacy.length == 6)
+          ? [for (int i = 0; i < 6; i++) _cleanName(i, legacy[i])]
+          : List.of(defaultNames);
     }
     themeId = p.getString(_kTheme) ?? 'midnight-silk';
     marbleStyleId = p.getString(_kStyle) ?? 'qinghua';
@@ -104,7 +136,8 @@ class AppSettings extends ChangeNotifier {
     await p.setInt(_kDifficulty, aiDifficulty.index);
     await p.setBool(_kForward, forwardProgress);
     await p.setBool(_kSymmetric, symmetricVariant);
-    await p.setStringList(_kNames, playerNames);
+    await p.setString(_kNamesJson, encodePlayerNames(playerNames));
+    await p.remove(_kNames); // drop the legacy unordered key for good
     await p.setString(_kTheme, themeId);
     await p.setString(_kStyle, marbleStyleId);
     await p.setString(_kAccent, boardAccentId);
