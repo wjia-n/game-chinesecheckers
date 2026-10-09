@@ -51,6 +51,17 @@ class Ai {
     return score;
   }
 
+  /// Cheap static score used for sorting/pruning candidates — no cloning.
+  /// Full evaluation runs only on the pruned shortlist.
+  double _quickScore(GameState g, int pi, Move m) {
+    final seat = g.players[pi].seat;
+    var s =
+        g.board.progressOf(m.to, seat) - g.board.progressOf(m.from, seat);
+    s += m.hopCount * 0.35;
+    if (!g.inDest(m.from, pi) && g.inDest(m.to, pi)) s += 2.0;
+    return s;
+  }
+
   double _scoreMove(GameState g, int pi, Move m) {
     // Apply on a scratch copy for exact evaluation.
     final scratch = _cloneFor(g);
@@ -76,10 +87,7 @@ class Ai {
     return score;
   }
 
-  GameState _cloneFor(GameState g) {
-    final c = GameState.decode(g.encode());
-    return c;
-  }
+  GameState _cloneFor(GameState g) => g.cloneForSearch();
 
   /// Best reply value for the player after [pi] in turn order.
   double _replyValue(GameState g, int pi, Move m, int breadth) {
@@ -92,8 +100,9 @@ class Ai {
     final opp = scratch.turnIndex;
     final replies = scratch.legalMoves(opp);
     if (replies.isEmpty) return evaluate(scratch, pi);
+    // Cheap sort for pruning; full evaluation only on the shortlist.
     replies.sort((a, b) =>
-        _scoreMove(scratch, opp, b).compareTo(_scoreMove(scratch, opp, a)));
+        _quickScore(scratch, opp, b).compareTo(_quickScore(scratch, opp, a)));
     // Opponent maximizes their own score = minimizes ours.
     var worst = 1e9;
     for (final r in replies.take(breadth)) {
@@ -118,14 +127,26 @@ class Ai {
       final base = _scoreMove(g, pi, m);
       return switch (difficulty) {
         Difficulty.porcelain => base,
-        Difficulty.lacquer => base * 0.4 + _replyValue(g, pi, m, 6) * 0.6,
+        Difficulty.lacquer => base * 0.4 + _replyValue(g, pi, m, 5) * 0.6,
         Difficulty.imperial => base * 0.25 +
             _replyValueImperial(g, pi, m),
       };
     }
 
+    // Prune to a shortlist with the cheap score first: full (expensive)
+    // evaluation runs only on plausible candidates.
+    final shortlistN = switch (difficulty) {
+      Difficulty.porcelain => 12,
+      Difficulty.lacquer => 10,
+      Difficulty.imperial => 8,
+    };
+    final shortlist = [...moves]
+      ..sort((a, b) =>
+          _quickScore(g, pi, b).compareTo(_quickScore(g, pi, a)));
+    final candidates = shortlist.take(shortlistN).toList();
+
     final pairs = <({Move m, double v})>[
-      for (final m in moves) (m: m, v: value(m))
+      for (final m in candidates) (m: m, v: value(m))
     ]..sort((a, b) => b.v.compareTo(a.v));
 
     final topN = switch (difficulty) {
@@ -148,9 +169,9 @@ class Ai {
     final opp = s1.turnIndex;
     final replies = s1.legalMoves(opp)
       ..sort((a, b) =>
-          _scoreMove(s1, opp, b).compareTo(_scoreMove(s1, opp, a)));
+          _quickScore(s1, opp, b).compareTo(_quickScore(s1, opp, a)));
     var worst = 1e9;
-    for (final r in replies.take(5)) {
+    for (final r in replies.take(4)) {
       final s2 = _cloneFor(s1);
       s2.commitMove(r);
       if (s2.status != GameStatus.playing) {
@@ -162,9 +183,9 @@ class Ai {
       final mine = _ownIndex(s2, g.players[pi].seat);
       final myMoves = s2.legalMoves(mine)
         ..sort((a, b) =>
-            _scoreMove(s2, mine, b).compareTo(_scoreMove(s2, mine, a)));
+            _quickScore(s2, mine, b).compareTo(_quickScore(s2, mine, a)));
       var bestCounter = -1e9;
-      for (final c in myMoves.take(6)) {
+      for (final c in myMoves.take(4)) {
         final s3 = _cloneFor(s2);
         s3.commitMove(c);
         final v = evaluate(s3, pi);

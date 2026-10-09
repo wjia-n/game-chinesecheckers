@@ -4,7 +4,7 @@ import '../engine/board.dart';
 import '../engine/game.dart';
 import '../state/save.dart';
 import '../state/settings.dart';
-import '../theme/imperial.dart';
+import '../theme/cc_themes.dart';
 import 'board_screen.dart';
 import 'widgets.dart';
 
@@ -26,15 +26,25 @@ class GameOverScreen extends StatelessWidget {
     required this.onExitToMenu,
   });
 
+  CcTheme get _t => settings.theme;
+
+  String _nameOf(int pi) {
+    final seat = game.players[pi].seat;
+    final n = settings.playerNames[seat];
+    return n.isEmpty ? 'Player ${pi + 1}' : n;
+  }
+
   @override
   Widget build(BuildContext context) {
+    final t = _t;
     final isWin = game.status == GameStatus.won;
     final ranks = game.ranks();
     final pts = game.matchPoints();
     final winnerSeat =
         isWin ? game.players[game.winnerIndex].seat : -1;
-    return BrocadeBackground(
-      child: SafeArea(
+    return Scaffold(
+      backgroundColor: t.silk,
+      body: SafeArea(
         child: SingleChildScrollView(
           padding: const EdgeInsets.all(18),
           child: Column(
@@ -46,41 +56,59 @@ class GameOverScreen extends StatelessWidget {
                 child: CustomPaint(
                   painter: _PyramidPainter(
                     base: isWin
-                        ? Imperial.marbleBase[winnerSeat]
-                        : Imperial.gold,
+                        ? t.marbles[winnerSeat]
+                        : t.gold,
+                    gold: t.gold,
+                    style: settings.marbleStyleId,
                   ),
                 ),
               ),
               const SizedBox(height: 6),
               // Ribbon banner.
               PorcelainPlaque(
+                theme: t,
                 padding: const EdgeInsets.symmetric(
                     horizontal: 28, vertical: 12),
                 child: Text(
                   isWin ? 'VICTORY!' : 'DRAW',
-                  style: Imperial.plaqueTitle(34),
+                  style: TextStyle(
+                      fontFamily: 'serif',
+                      fontSize: 34,
+                      fontWeight: FontWeight.w700,
+                      color: t.lacquerDeep,
+                      letterSpacing: 1.2),
                 ),
               ),
               const SizedBox(height: 12),
               if (isWin)
                 SilkTray(
+                  theme: t,
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
                       MarbleDot(
-                          base: Imperial.marbleBase[winnerSeat], size: 52),
+                          base: t.marbles[winnerSeat],
+                          size: 52,
+                          style: settings.marbleStyleId,
+                          theme: t),
                       const SizedBox(width: 14),
                       Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            '${Imperial.marbleNames[winnerSeat]} triumphs!',
-                            style: Imperial.headline(20),
+                            '${_nameOf(game.winnerIndex)} triumphs!',
+                            style: TextStyle(
+                                fontFamily: 'serif',
+                                fontSize: 20,
+                                fontWeight: FontWeight.w700,
+                                color: t.ivory),
                           ),
                           Text(
                             'All ten marbles rest in the home star.',
-                            style: Imperial.body(13,
-                                color: Imperial.ivoryText
+                            style: TextStyle(
+                                fontFamily: 'serif',
+                                fontSize: 13,
+                                color: t.ivory
                                     .withValues(alpha: 0.7)),
                           ),
                         ],
@@ -90,25 +118,34 @@ class GameOverScreen extends StatelessWidget {
                 )
               else
                 SilkTray(
+                  theme: t,
                   child: Text(
                     game.drawReason.isEmpty
                         ? 'The star rests in perfect balance.'
                         : game.drawReason,
-                    style: Imperial.body(15),
+                    style: TextStyle(
+                        fontFamily: 'serif',
+                        fontSize: 15,
+                        color: t.ivory),
                     textAlign: TextAlign.center,
                   ),
                 ),
               const SizedBox(height: 14),
               // Standings tablets.
               SilkTray(
+                theme: t,
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text('STANDINGS',
-                        style: Imperial.label(13)),
-                    Imperial.divider(),
+                        style: TextStyle(
+                            fontSize: 13,
+                            letterSpacing: 3,
+                            fontWeight: FontWeight.w600,
+                            color: t.gold)),
+                    goldDivider(t),
                     for (int rank = 0; rank < ranks.length; rank++)
-                      _standingRow(ranks[rank], rank, pts),
+                      _standingRow(ranks[rank], rank, pts, t),
                   ],
                 ),
               ),
@@ -116,6 +153,7 @@ class GameOverScreen extends StatelessWidget {
               // Match points.
               if (matchScores.isNotEmpty)
                 SilkTray(
+                  theme: t,
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -123,7 +161,11 @@ class GameOverScreen extends StatelessWidget {
                         children: [
                           Expanded(
                               child: Text('MATCH POINTS',
-                                  style: Imperial.label(13))),
+                                  style: TextStyle(
+                                      fontSize: 13,
+                                      letterSpacing: 3,
+                                      fontWeight: FontWeight.w600,
+                                      color: t.gold))),
                           GestureDetector(
                             onTap: () {
                               matchScores.clear();
@@ -132,12 +174,15 @@ class GameOverScreen extends StatelessWidget {
                               onExitToMenu();
                             },
                             child: Text('RESET MATCH',
-                                style: Imperial.label(11,
-                                    color: Imperial.cinnabarText)),
+                                style: TextStyle(
+                                    fontSize: 11,
+                                    letterSpacing: 2,
+                                    fontWeight: FontWeight.w600,
+                                    color: t.goldBright)),
                           ),
                         ],
                       ),
-                      Imperial.divider(),
+                      goldDivider(t),
                       for (final e in _sortedMatch())
                         Padding(
                           padding:
@@ -145,11 +190,18 @@ class GameOverScreen extends StatelessWidget {
                           child: Row(
                             children: [
                               Expanded(
-                                child: Text(e.key,
-                                    style: Imperial.body(15)),
+                                child: Text(_matchName(e.key),
+                                    style: TextStyle(
+                                        fontFamily: 'serif',
+                                        fontSize: 15,
+                                        color: t.ivory)),
                               ),
                               Text('${e.value}',
-                                  style: Imperial.label(14)),
+                                  style: TextStyle(
+                                      fontSize: 14,
+                                      letterSpacing: 2,
+                                      fontWeight: FontWeight.w600,
+                                      color: t.gold)),
                             ],
                           ),
                         ),
@@ -159,6 +211,7 @@ class GameOverScreen extends StatelessWidget {
               const SizedBox(height: 18),
               LacquerButton(
                 text: 'Play Again',
+                theme: t,
                 onPressed: () {
                   sound.play(SfxKind.start);
                   final fresh = GameState(
@@ -168,6 +221,7 @@ class GameOverScreen extends StatelessWidget {
                     ],
                     forwardProgress: settings.forwardProgress,
                   );
+                  sound.startGameMusic();
                   Navigator.of(context).pushReplacement(
                     MaterialPageRoute(
                       builder: (_) => BoardScreen(
@@ -185,6 +239,7 @@ class GameOverScreen extends StatelessWidget {
               PorcelainButton(
                 text: 'Main Menu',
                 icon: Icons.home,
+                theme: t,
                 onPressed: onExitToMenu,
               ),
               const SizedBox(height: 20),
@@ -195,7 +250,19 @@ class GameOverScreen extends StatelessWidget {
     );
   }
 
-  Widget _standingRow(int pi, int rank, Map<int, int> pts) {
+  String _matchName(String key) {
+    // Keys are 'seat_<n>' (new) or legacy color names.
+    if (key.startsWith('seat_')) {
+      final seat = int.tryParse(key.substring(5)) ?? -1;
+      if (seat >= 0 && seat < 6) {
+        final n = settings.playerNames[seat];
+        if (n.isNotEmpty) return n;
+      }
+    }
+    return key;
+  }
+
+  Widget _standingRow(int pi, int rank, Map<int, int> pts, CcTheme t) {
     final seat = game.players[pi].seat;
     final isWinner = game.status == GameStatus.won && rank == 0;
     return Container(
@@ -203,13 +270,13 @@ class GameOverScreen extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
         color: isWinner
-            ? Imperial.gold.withValues(alpha: 0.12)
-            : Imperial.silkLow,
+            ? t.gold.withValues(alpha: 0.12)
+            : t.silkRaised,
         borderRadius: BorderRadius.circular(10),
         border: Border.all(
           color: isWinner
-              ? Imperial.gold
-              : Imperial.goldOxidized.withValues(alpha: 0.4),
+              ? t.gold
+              : t.goldOxidized.withValues(alpha: 0.4),
         ),
       ),
       child: Row(
@@ -217,32 +284,48 @@ class GameOverScreen extends StatelessWidget {
           SizedBox(
             width: 26,
             child: Text(isWinner ? '♛' : '${rank + 1}',
-                style: Imperial.label(16,
+                style: TextStyle(
+                    fontSize: 16,
+                    letterSpacing: 2,
+                    fontWeight: FontWeight.w600,
                     color: isWinner
-                        ? Imperial.goldBright
-                        : Imperial.ivoryText)),
+                        ? t.goldBright
+                        : t.ivory.withValues(alpha: 0.7))),
           ),
-          MarbleDot(base: Imperial.marbleBase[seat], size: 34),
+          MarbleDot(
+              base: t.marbles[seat],
+              size: 34,
+              style: settings.marbleStyleId,
+              theme: t),
           const SizedBox(width: 10),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  '${Imperial.marbleNames[seat]}${game.players[pi].isHuman ? '' : '  •  Bot'}',
-                  style: Imperial.body(15, color: Imperial.ivory),
+                  '${_nameOf(pi)}${game.players[pi].isHuman ? '' : '  •  Bot'}',
+                  style: TextStyle(
+                      fontFamily: 'serif',
+                      fontSize: 15,
+                      color: t.ivory),
                 ),
                 Text(
                   '${game.countInDest(pi)}/10 home  •  ${game.moveCounts[pi]} moves',
-                  style: Imperial.body(12,
+                  style: TextStyle(
+                      fontFamily: 'serif',
+                      fontSize: 12,
                       color:
-                          Imperial.ivoryText.withValues(alpha: 0.6)),
+                          t.ivory.withValues(alpha: 0.6)),
                 ),
               ],
             ),
           ),
           Text('+${pts[pi] ?? 0}',
-              style: Imperial.label(14, color: Imperial.goldBright)),
+              style: TextStyle(
+                  fontSize: 14,
+                  letterSpacing: 2,
+                  fontWeight: FontWeight.w600,
+                  color: t.goldBright)),
         ],
       ),
     );
@@ -258,7 +341,10 @@ class GameOverScreen extends StatelessWidget {
 /// Marble pyramid trophy painted on silk.
 class _PyramidPainter extends CustomPainter {
   final Color base;
-  _PyramidPainter({required this.base});
+  final Color gold;
+  final String style;
+  _PyramidPainter(
+      {required this.base, required this.gold, required this.style});
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -271,48 +357,19 @@ class _PyramidPainter extends CustomPainter {
       for (int i = 0; i < count; i++) {
         final x = cx + (i - (count - 1) / 2) * r * 2.15;
         final y = baseY - row * r * 1.9;
-        _marble(canvas, Offset(x, y), r, base, row);
+        paintMarbleFace(canvas, Offset(x, y), r, base, style);
+        canvas.drawCircle(
+            Offset(x, y),
+            r,
+            Paint()
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = 1.2
+              ..color = gold.withValues(alpha: 0.7));
       }
     }
   }
 
-  void _marble(Canvas canvas, Offset c, double r, Color base, int row) {
-    final shade =
-        HSLColor.fromColor(base).withLightness((0.55 - row * 0.06).clamp(0.15, 0.8)).toColor();
-    canvas.drawOval(
-        Rect.fromCenter(
-            center: c + Offset(r * 0.2, r * 0.9),
-            width: r * 1.7,
-            height: r * 0.6),
-        Paint()..color = Colors.black.withValues(alpha: 0.5));
-    canvas.drawCircle(
-        c,
-        r,
-        Paint()
-          ..shader = RadialGradient(
-            center: const Alignment(-0.42, -0.48),
-            radius: 1.25,
-            colors: [
-              Imperial.marbleLight(base),
-              shade,
-              Imperial.marbleDark(base)
-            ],
-          ).createShader(Rect.fromCircle(center: c, radius: r)));
-    canvas.drawOval(
-        Rect.fromCenter(
-            center: c + Offset(-r * 0.34, -r * 0.40),
-            width: r * 0.52,
-            height: r * 0.32),
-        Paint()..color = Colors.white.withValues(alpha: 0.85));
-    canvas.drawCircle(
-        c,
-        r,
-        Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 1.2
-          ..color = Imperial.gold.withValues(alpha: 0.7));
-  }
-
   @override
-  bool shouldRepaint(covariant _PyramidPainter old) => old.base != base;
+  bool shouldRepaint(covariant _PyramidPainter old) =>
+      old.base != base || old.style != style;
 }

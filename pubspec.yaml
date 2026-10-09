@@ -2,7 +2,7 @@ name: chinesecheckers
 description: Chinese Checkers by Wajiha - imperial porcelain edition. 100% free fun game.
 publish_to: 'none'
 
-version: 1.0.0+1
+version: 2.0.0+2
 
 environment:
   sdk: ^3.13.5
@@ -12,6 +12,7 @@ dependencies:
     sdk: flutter
   audioplayers: ^6.8.1
   shared_preferences: ^2.5.6
+  in_app_purchase: ^3.2.0
 
 dev_dependencies:
   flutter_test:
@@ -20,3 +21,7 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+
+  assets:
+    - assets/cc_logo.png
+    - assets/wajiha_logo.png

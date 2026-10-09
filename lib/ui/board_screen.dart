@@ -6,15 +6,20 @@ import '../audio/sound_engine.dart';
 import '../engine/ai.dart';
 import '../engine/board.dart';
 import '../engine/game.dart';
+import '../engine/turn_director.dart';
 import '../state/save.dart';
 import '../state/settings.dart';
-import '../theme/imperial.dart';
+import '../theme/cc_themes.dart';
 import 'gameover_screen.dart';
 import 'settings_screen.dart';
 import 'widgets.dart';
 
-/// The Imperial Arena: cinnabar lacquer star board, porcelain marbles,
-/// gold inlay move rings, weighty hop animations.
+/// The Imperial Arena: lacquered star board, porcelain marbles, gold inlay
+/// move rings, weighty hop-by-hop animations.
+///
+/// Turn flow is owned by [TurnDirector] (engine-owned state machine +
+/// watchdog). The screen only renders, animates moves visibly, narrates,
+/// and forwards human input — it never owns turn timers.
 class BoardScreen extends StatefulWidget {
   final GameState game;
   final AppSettings settings;
@@ -38,14 +43,16 @@ class BoardScreen extends StatefulWidget {
 class _BoardScreenState extends State<BoardScreen>
     with TickerProviderStateMixin, WidgetsBindingObserver {
   late GameState g;
-  final Ai _ai = Ai();
+  late TurnDirector director;
+  StreamSubscription<TurnEvent>? _events;
+
   int _selected = -1;
   Set<int> _dests = {};
-  bool _busy = false; // animation or bot thinking
 
-  // Move animation state.
-  AnimationController? _anim;
+  // Hop-by-hop move animation state.
+  AnimationController? _animCtl;
   List<int> _animPath = [];
+  int _animSeg = -1; // current path segment being flown
   int _animHidden = -1; // destination hole hidden while marble flies
 
   // Invalid-move shake.
@@ -56,8 +63,11 @@ class _BoardScreenState extends State<BoardScreen>
   Move? _hint;
   Timer? _hintTimer;
 
-  // Draw offer state.
   bool _drawOffered = false;
+
+  CcTheme get _t => widget.settings.theme;
+  BoardAccent get _accent =>
+      CcThemes.accentById(widget.settings.boardAccentId);
 
   @override
   void initState() {
@@ -66,14 +76,48 @@ class _BoardScreenState extends State<BoardScreen>
     WidgetsBinding.instance.addObserver(this);
     _shake = AnimationController(
         vsync: this, duration: const Duration(milliseconds: 320));
-    WidgetsBinding.instance
-        .addPostFrameCallback((_) => _afterTurn());
+    _wireDirector();
+    widget.settings.addListener(_onSettingsChanged);
+  }
+
+  void _wireDirector() {
+    director = TurnDirector(game: g);
+    director.displayNames = _displayNames();
+    director.animateMove = _animateMoveStepped;
+    director.onCommitted = () {
+      _persist();
+      if (mounted) setState(() {});
+    };
+    director.onFinished = () {
+      if (mounted) _finishGame();
+    };
+    _events = director.events.listen((e) {
+      if (!mounted) return;
+      if (e.kind == TurnEventKind.humanPrompt) {
+        widget.sound.play(SfxKind.turnTick);
+      }
+      setState(() {}); // narration / tray highlight / phase
+    });
+    director.start();
+  }
+
+  List<String> _displayNames() => [
+        for (int pi = 0; pi < g.players.length; pi++)
+          widget.settings.playerNames[g.players[pi].seat],
+      ];
+
+  void _onSettingsChanged() {
+    director.displayNames = _displayNames();
+    if (mounted) setState(() {});
   }
 
   @override
   void dispose() {
+    widget.settings.removeListener(_onSettingsChanged);
     WidgetsBinding.instance.removeObserver(this);
-    _anim?.dispose();
+    _events?.cancel();
+    director.dispose();
+    _animCtl?.dispose();
     _shake?.dispose();
     _hintTimer?.cancel();
     super.dispose();
@@ -95,7 +139,8 @@ class _BoardScreenState extends State<BoardScreen>
   // ---------------- interaction ----------------
 
   void _tapHole(int idx) {
-    if (_busy || g.status != GameStatus.playing) return;
+    if (director.phase != TurnPhase.awaitingHuman) return;
+    if (g.status != GameStatus.playing) return;
     if (!g.current.isHuman) return;
     final pi = g.turnIndex;
     if (_selected != -1 && _dests.contains(idx)) {
@@ -122,7 +167,6 @@ class _BoardScreenState extends State<BoardScreen>
         }
       });
     } else if (_selected != -1) {
-      // Tapped an illegal hole while a marble is selected.
       widget.sound.play(SfxKind.invalid);
       _shakeIt(_selected);
       HapticFeedback.lightImpact();
@@ -136,84 +180,60 @@ class _BoardScreenState extends State<BoardScreen>
   }
 
   Future<void> _humanMove(Move move) async {
-    final wasHop = !move.isStep;
     setState(() {
-      _busy = true;
       _selected = -1;
       _dests = {};
       _hint = null;
     });
-    await _animateMove(move);
-    final ok = g.commitMove(move);
-    if (!ok) {
-      // Should never happen: the move came from legal generation.
-      setState(() => _busy = false);
-      return;
-    }
-    widget.sound.play(wasHop ? SfxKind.hop : SfxKind.step);
-    await _persist();
-    if (!mounted) return;
-    setState(() => _busy = false);
-    if (g.status != GameStatus.playing) {
-      _finishGame();
-      return;
-    }
-    _afterTurn();
+    final ok = await director.humanMove(move);
+    if (!ok) widget.sound.play(SfxKind.invalid);
   }
 
-  Future<void> _animateMove(Move move) async {
-    _anim?.dispose();
+  /// Animates a move hop-by-hop, visibly: every hop flies as its own beat
+  /// with a short dwell on each landing and its own sound. Never instant.
+  Future<void> _animateMoveStepped(Move move) async {
+    _animCtl?.dispose();
     _animPath = move.path;
     _animHidden = move.to;
+    _animSeg = -1;
     final hops = move.hopCount;
-    _anim = AnimationController(
-      vsync: this,
-      duration: Duration(milliseconds: 170 * hops + 130),
-    );
-    setState(() {});
-    await _anim!.forward();
-    _anim?.dispose();
-    _anim = null;
-    _animPath = [];
-    _animHidden = -1;
-  }
-
-  void _afterTurn() {
-    if (!mounted || g.status != GameStatus.playing) return;
-    if (!g.current.isHuman && !_busy) {
-      setState(() => _busy = true);
-      final gameGen = g; // stale bot callbacks must not touch a restarted game
-      Future.delayed(const Duration(milliseconds: 650), () async {
-        if (!mounted ||
-            !identical(gameGen, g) ||
-            g.status != GameStatus.playing) {
-          return;
-        }
-        final pi = g.turnIndex;
-        if (g.current.isHuman) {
-          setState(() => _busy = false);
-          return;
-        }
-        final move =
-            await Future(() => _ai.chooseMove(g, pi, g.current.difficulty));
-        await _animateMove(move);
-        g.commitMove(move);
-        widget.sound.play(move.isStep ? SfxKind.step : SfxKind.hop);
-        await _persist();
-        if (!mounted) return;
-        setState(() => _busy = false);
-        if (g.status != GameStatus.playing) {
-          _finishGame();
-          return;
-        }
-        if (g.current.isHuman) widget.sound.play(SfxKind.turnTick);
-        _afterTurn();
-      });
+    final isBot = !g.current.isHuman;
+    final who = director.nameOf(g.turnIndex);
+    for (int sgi = 0; sgi < hops; sgi++) {
+      if (!mounted) return;
+      _animSeg = sgi;
+      _animCtl = AnimationController(
+        vsync: this,
+        duration:
+            Duration(milliseconds: move.isStep ? 210 : 240),
+      );
+      if (!move.isStep && isBot && hops > 1) {
+        director.narration = '$who hops… (${sgi + 1}/$hops)';
+      }
+      setState(() {});
+      // Per-hop sound at the start of each beat.
+      widget.sound.play(move.isStep ? SfxKind.step : SfxKind.hop);
+      try {
+        await _animCtl!.forward();
+      } catch (_) {
+        break; // disposed mid-flight: stop quietly, engine still commits
+      }
+      if (sgi < hops - 1) {
+        // Dwell on the landing so each hop reads as a distinct step.
+        await Future.delayed(const Duration(milliseconds: 120));
+      }
     }
+    _animCtl?.dispose();
+    _animCtl = null;
+    _animPath = [];
+    _animSeg = -1;
+    _animHidden = -1;
+    if (mounted) setState(() {});
   }
 
   void _undo() {
-    if (_busy || !g.canUndo || !g.current.isHuman) return;
+    if (director.phase != TurnPhase.awaitingHuman) return;
+    if (!g.canUndo || !g.current.isHuman) return;
     widget.sound.play(SfxKind.click);
     setState(() {
       g.undo();
@@ -222,15 +242,19 @@ class _BoardScreenState extends State<BoardScreen>
       _hint = null;
     });
     _persist();
+    director.resync();
   }
 
   void _showHint() {
-    if (_busy || g.status != GameStatus.playing || !g.current.isHuman) {
+    if (director.phase != TurnPhase.awaitingHuman ||
+        g.status != GameStatus.playing ||
+        !g.current.isHuman) {
       return;
     }
     widget.sound.play(SfxKind.hint);
     final pi = g.turnIndex;
-    Future(() => _ai.chooseMove(g, pi, widget.settings.aiDifficulty))
+    final ai = Ai();
+    Future(() => ai.chooseMove(g, pi, widget.settings.aiDifficulty))
         .then((move) {
       if (!mounted) return;
       setState(() => _hint = move);
@@ -245,10 +269,14 @@ class _BoardScreenState extends State<BoardScreen>
     _persist();
     final isWin = g.status == GameStatus.won;
     widget.sound.play(isWin ? SfxKind.win : SfxKind.lose);
+    final humanWon =
+        isWin && g.players[g.winnerIndex].isHuman;
+    widget.settings.recordGame(
+        humanWon: humanWon, turns: g.totalTurns);
     // Update cumulative match scores.
     final pts = g.matchPoints();
     pts.forEach((pi, p) {
-      final key = Imperial.marbleNames[g.players[pi].seat];
+      final key = 'seat_${g.players[pi].seat}';
       widget.matchScores[key] = (widget.matchScores[key] ?? 0) + p;
     });
     SaveManager.clearGame();
@@ -269,17 +297,18 @@ class _BoardScreenState extends State<BoardScreen>
   // ---------------- pause menu ----------------
 
   void _pause() {
-    if (_busy) return;
+    if (director.phase != TurnPhase.awaitingHuman) return;
     widget.sound.play(SfxKind.click);
+    final t = _t;
     final humans = g.players.where((p) => p.isHuman).length;
     imperialDialog(
       context,
       Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text('PAUSED', style: Imperial.plaqueTitle(26)),
+          Text('PAUSED', style: _serifTitle(26, t.lacquerDeep)),
           const SizedBox(height: 4),
-          Imperial.divider(),
+          goldDivider(t),
           _pauseBtn('Resume', Icons.play_arrow, () {
             Navigator.pop(context);
           }),
@@ -294,7 +323,6 @@ class _BoardScreenState extends State<BoardScreen>
             await Navigator.of(context).push(MaterialPageRoute(
                 builder: (_) => SettingsScreen(
                     settings: widget.settings, sound: widget.sound)));
-            _applyAudio();
           }),
           if (humans > 1) ...[
             const SizedBox(height: 10),
@@ -312,24 +340,28 @@ class _BoardScreenState extends State<BoardScreen>
           }),
         ],
       ),
+      theme: t,
     );
   }
 
   Widget _pauseBtn(String text, IconData icon, VoidCallback onTap) {
     return SizedBox(
       width: double.infinity,
-      child: PorcelainButton(text: text, icon: icon, onPressed: onTap),
+      child: PorcelainButton(
+          text: text, icon: icon, onPressed: onTap, theme: _t),
     );
   }
 
   void _restart() {
     widget.sound.play(SfxKind.start);
+    _events?.cancel();
+    director.dispose();
     final fresh = GameState(
       board: Board(),
       players: [for (final p in g.players) p.copy()],
       forwardProgress: widget.settings.forwardProgress,
     );
-    // Randomize first player among humans (RULES.md §3).
+    // First player randomized among humans (RULES.md §3).
     final humans = [
       for (int i = 0; i < fresh.players.length; i++)
         if (fresh.players[i].isHuman) i
@@ -342,37 +374,45 @@ class _BoardScreenState extends State<BoardScreen>
       _selected = -1;
       _dests = {};
       _hint = null;
-      _busy = false;
       _drawOffered = false;
+      _animPath = [];
+      _animSeg = -1;
+      _animHidden = -1;
     });
     SaveManager.clearGame();
+    _wireDirector();
     _persist();
-    _afterTurn();
   }
 
   void _offerDraw() {
     if (_drawOffered) return;
     _drawOffered = true;
+    final t = _t;
     final botsAgree = g.botsAcceptDraw();
     imperialDialog(
       context,
       Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text('OFFER DRAW?', style: Imperial.plaqueTitle(24)),
+          Text('OFFER DRAW?', style: _serifTitle(24, t.lacquerDeep)),
           const SizedBox(height: 8),
           Text(
             botsAgree
                 ? 'The porcelain minds sense the stalemate and accept.'
                 : 'The porcelain minds decline — the game plays on.',
-            style: Imperial.body(15, color: Imperial.cinnabarDeep),
+            style: TextStyle(
+                fontFamily: 'serif',
+                fontSize: 15,
+                color: t.lacquerDeep),
             textAlign: TextAlign.center,
           ),
           const SizedBox(height: 6),
           Text(
             'All local players must agree to end in a draw.',
-            style: Imperial.body(13,
-                color: Imperial.cinnabarDeep.withValues(alpha: 0.7)),
+            style: TextStyle(
+                fontFamily: 'serif',
+                fontSize: 13,
+                color: t.lacquerDeep.withValues(alpha: 0.7)),
             textAlign: TextAlign.center,
           ),
           const SizedBox(height: 16),
@@ -381,6 +421,7 @@ class _BoardScreenState extends State<BoardScreen>
               Expanded(
                 child: PorcelainButton(
                     text: 'Keep Playing',
+                    theme: t,
                     onPressed: () {
                       _drawOffered = false;
                       Navigator.pop(context);
@@ -390,6 +431,7 @@ class _BoardScreenState extends State<BoardScreen>
               Expanded(
                 child: LacquerButton(
                   text: 'Agree',
+                  theme: t,
                   fontSize: 15,
                   padding: const EdgeInsets.symmetric(
                       horizontal: 12, vertical: 12),
@@ -409,15 +451,7 @@ class _BoardScreenState extends State<BoardScreen>
           ),
         ],
       ),
-    );
-  }
-
-  void _applyAudio() {
-    widget.sound.applySettings(
-      musicOn: widget.settings.musicOn,
-      sfxOn: widget.settings.sfxOn,
-      musicVolume: widget.settings.musicVolume,
-      sfxVolume: widget.settings.sfxVolume,
+      theme: t,
     );
   }
 
@@ -425,55 +459,59 @@ class _BoardScreenState extends State<BoardScreen>
 
   @override
   Widget build(BuildContext context) {
+    final t = _t;
     final current = g.current;
-    final marbleColor = Imperial.marbleBase[current.seat];
-    return BrocadeBackground(
-      child: SafeArea(
+    final canAct =
+        director.phase == TurnPhase.awaitingHuman && current.isHuman;
+    return Scaffold(
+      backgroundColor: t.silk,
+      body: SafeArea(
         child: Column(
           children: [
-            // Top plaque: current player + move counter + pause.
-            Padding(
-              padding: const EdgeInsets.fromLTRB(14, 10, 14, 6),
-              child: PorcelainPlaque(
+            // Per-side player trays: every seat has its own tray; the
+            // active side highlights with narration. Nobody auto-plays
+            // silently — the tray always shows whose turn it is.
+            SizedBox(
+              height: 96,
+              child: ListView.separated(
+                scrollDirection: Axis.horizontal,
                 padding:
-                    const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                itemCount: g.players.length,
+                separatorBuilder: (_, _) => const SizedBox(width: 8),
+                itemBuilder: (_, pi) => _playerTray(pi, t),
+              ),
+            ),
+            // Narration line.
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: AnimatedSwitcher(
+                duration: const Duration(milliseconds: 250),
                 child: Row(
+                  key: ValueKey(director.narration),
+                  mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    MarbleDot(base: marbleColor, size: 40),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            '${Imperial.marbleNames[current.seat]}${current.isHuman ? '' : '  •  ${difficultyName(current.difficulty)}'}',
-                            style: Imperial.plaqueTitle(17),
-                          ),
-                          Text(
-                            current.isHuman ? 'YOUR MOVE' : 'THINKING…',
-                            style: Imperial.label(11,
-                                color: Imperial.cinnabar),
-                          ),
-                        ],
+                    if (director.phase == TurnPhase.botThinking)
+                      _thinkingDots(t),
+                    Flexible(
+                      child: Text(
+                        director.narration,
+                        style: TextStyle(
+                          fontFamily: 'serif',
+                          fontSize: 14,
+                          fontStyle: FontStyle.italic,
+                          color: t.goldBright.withValues(alpha: 0.95),
+                        ),
+                        textAlign: TextAlign.center,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
                       ),
                     ),
-                    Column(
-                      crossAxisAlignment: CrossAxisAlignment.end,
-                      children: [
-                        Text('MOVE',
-                            style: Imperial.label(10,
-                                color: Imperial.goldOxidized)),
-                        Text('${g.totalTurns} / 300',
-                            style: Imperial.body(14,
-                                color: Imperial.cinnabarDeep)),
-                      ],
-                    ),
-                    const SizedBox(width: 10),
-                    _discButton(Icons.pause, () => _pause()),
                   ],
                 ),
               ),
             ),
+            const SizedBox(height: 4),
             // Board.
             Expanded(
               child: Padding(
@@ -489,9 +527,10 @@ class _BoardScreenState extends State<BoardScreen>
                         if (idx != null) _tapHole(idx);
                       },
                       child: AnimatedBuilder(
-                        animation: Listenable.merge(
-                            [_anim ?? const AlwaysStoppedAnimation(0),
-                             _shake ?? const AlwaysStoppedAnimation(0)]),
+                        animation: Listenable.merge([
+                          _animCtl ?? const AlwaysStoppedAnimation(0),
+                          _shake ?? const AlwaysStoppedAnimation(0),
+                        ]),
                         builder: (_, _) => CustomPaint(
                           painter: StarBoardPainter(
                             board: g.board,
@@ -501,10 +540,14 @@ class _BoardScreenState extends State<BoardScreen>
                             dests: _dests,
                             hint: _hint,
                             animPath: _animPath,
-                            animT: _anim?.value ?? 0,
+                            animSeg: _animSeg,
+                            animT: _animCtl?.value ?? 0,
                             animHidden: _animHidden,
                             shakeHole: _shakeHole,
                             shakeT: _shake?.value ?? 0,
+                            theme: t,
+                            accent: _accent,
+                            marbleStyle: widget.settings.marbleStyleId,
                           ),
                           size: size,
                         ),
@@ -521,17 +564,18 @@ class _BoardScreenState extends State<BoardScreen>
                 mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                 children: [
                   _dockDisc(Icons.undo, 'Undo',
-                      g.canUndo && g.current.isHuman && !_busy
-                          ? _undo
-                          : null),
+                      canAct && g.canUndo ? _undo : null),
                   _dockDisc(Icons.lightbulb_outline, 'Hint',
-                      g.current.isHuman && !_busy ? _showHint : null),
+                      canAct ? _showHint : null),
                   LacquerButton(
                     text: 'Menu',
+                    theme: t,
                     fontSize: 15,
                     padding: const EdgeInsets.symmetric(
                         horizontal: 30, vertical: 12),
-                    onPressed: () => _pause(),
+                    onPressed: director.phase == TurnPhase.awaitingHuman
+                        ? () => _pause()
+                        : null,
                   ),
                 ],
               ),
@@ -542,33 +586,119 @@ class _BoardScreenState extends State<BoardScreen>
     );
   }
 
-  Widget _discButton(IconData icon, VoidCallback onTap) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        width: 42,
-        height: 42,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          gradient: const LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [Imperial.cinnabar, Imperial.cinnabarDeep],
-          ),
-          border: Border.all(color: Imperial.gold, width: 1.4),
-          boxShadow: const [
-            BoxShadow(
-                color: Color(0x88000000),
-                offset: Offset(0, 3),
-                blurRadius: 6),
-          ],
+  Widget _thinkingDots(CcTheme t) {
+    return Padding(
+      padding: const EdgeInsets.only(right: 8),
+      child: _PulsingDots(color: t.goldBright),
+    );
+  }
+
+  /// One side's tray: marble, renameable display name, human/bot chip,
+  /// home progress. The active side gets the gold ring.
+  Widget _playerTray(int pi, CcTheme t) {
+    final p = g.players[pi];
+    final active = director.activePlayer == pi &&
+        g.status == GameStatus.playing;
+    final name = director.displayNames.length > pi
+        ? director.displayNames[pi]
+        : 'Player ${pi + 1}';
+    final home = g.countInDest(pi);
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 250),
+      width: 128,
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(12),
+        color: active ? t.panel : t.silkRaised.withValues(alpha: 0.6),
+        border: Border.all(
+          color: active ? t.goldBright : t.goldOxidized.withValues(alpha: 0.4),
+          width: active ? 2.2 : 1,
         ),
-        child: Icon(icon, color: Imperial.ivory, size: 22),
+        boxShadow: active
+            ? [
+                BoxShadow(
+                  color: t.gold.withValues(alpha: 0.35),
+                  blurRadius: 10,
+                  spreadRadius: 1,
+                ),
+              ]
+            : null,
+      ),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              MarbleDot(
+                base: t.marbles[p.seat],
+                size: 30,
+                selected: active,
+                style: widget.settings.marbleStyleId,
+                theme: t,
+              ),
+              const SizedBox(width: 6),
+              Flexible(
+                child: Text(
+                  name,
+                  style: TextStyle(
+                    fontFamily: 'serif',
+                    fontSize: 13,
+                    fontWeight:
+                        active ? FontWeight.w700 : FontWeight.w400,
+                    color: t.ivory,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Container(
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 8, vertical: 2),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(10),
+                  color: p.isHuman
+                      ? t.lacquer.withValues(alpha: 0.85)
+                      : t.silk,
+                  border: Border.all(
+                      color: t.goldOxidized.withValues(alpha: 0.6)),
+                ),
+                child: Text(
+                  p.isHuman
+                      ? 'HUMAN'
+                      : difficultyName(p.difficulty).toUpperCase(),
+                  style: TextStyle(
+                    fontSize: 9,
+                    letterSpacing: 1.5,
+                    fontWeight: FontWeight.w600,
+                    color: t.goldBright,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 6),
+              Text(
+                '$home/10',
+                style: TextStyle(
+                  fontFamily: 'serif',
+                  fontSize: 11,
+                  color: t.gold.withValues(alpha: 0.9),
+                ),
+              ),
+            ],
+          ),
+        ],
       ),
     );
   }
 
   Widget _dockDisc(IconData icon, String label, VoidCallback? onTap) {
+    final t = _t;
     final enabled = onTap != null;
     return GestureDetector(
       onTap: onTap,
@@ -582,15 +712,15 @@ class _BoardScreenState extends State<BoardScreen>
               height: 58,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                gradient: const RadialGradient(
-                  center: Alignment(-0.35, -0.4),
+                gradient: RadialGradient(
+                  center: const Alignment(-0.35, -0.4),
                   radius: 1.2,
-                  colors: [Colors.white, Imperial.ivoryShade],
+                  colors: [Colors.white, t.ivoryShade],
                 ),
                 border: Border.all(
                     color: enabled
-                        ? Imperial.gold
-                        : Imperial.goldOxidized.withValues(alpha: 0.5),
+                        ? t.gold
+                        : t.goldOxidized.withValues(alpha: 0.5),
                     width: 1.6),
                 boxShadow: const [
                   BoxShadow(
@@ -599,14 +729,79 @@ class _BoardScreenState extends State<BoardScreen>
                       blurRadius: 8),
                 ],
               ),
-              child: Icon(icon,
-                  color: Imperial.cinnabarDeep, size: 26),
+              child: Icon(icon, color: t.lacquerDeep, size: 26),
             ),
           ),
           const SizedBox(height: 4),
           Text(label,
-              style: Imperial.label(9,
-                  color: Imperial.gold.withValues(alpha: 0.85))),
+              style: TextStyle(
+                  fontFamily: 'serif',
+                  fontSize: 9,
+                  letterSpacing: 2,
+                  fontWeight: FontWeight.w600,
+                  color: t.gold.withValues(alpha: 0.85))),
+        ],
+      ),
+    );
+  }
+
+  TextStyle _serifTitle(double size, Color color) => TextStyle(
+        fontFamily: 'serif',
+        fontSize: size,
+        fontWeight: FontWeight.w700,
+        color: color,
+        letterSpacing: 1.2,
+      );
+}
+
+class _PulsingDots extends StatefulWidget {
+  final Color color;
+  const _PulsingDots({required this.color});
+
+  @override
+  State<_PulsingDots> createState() => _PulsingDotsState();
+}
+
+class _PulsingDotsState extends State<_PulsingDots>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _c;
+
+  @override
+  void initState() {
+    super.initState();
+    _c = AnimationController(
+        vsync: this, duration: const Duration(milliseconds: 900))
+      ..repeat();
+  }
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _c,
+      builder: (_, _) => Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          for (int i = 0; i < 3; i++)
+            Container(
+              margin: const EdgeInsets.symmetric(horizontal: 1.5),
+              width: 6,
+              height: 6,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: widget.color.withValues(
+                    alpha: 0.35 +
+                        0.65 *
+                            (0.5 +
+                                0.5 *
+                                    sin(_c.value * 2 * pi - i * 2.1))),
+              ),
+            ),
         ],
       ),
     );
@@ -614,8 +809,9 @@ class _BoardScreenState extends State<BoardScreen>
 }
 
 // =====================================================================
-// The star board painter — cinnabar lacquer, gold inlay, concave dimples,
-// glossy qinghua porcelain marbles with real weight in their motion.
+// The star board painter — lacquered star, gold inlay, concave dimples,
+// glossy porcelain marbles with real weight in their motion.
+// Theme-driven: every color comes from the active CcTheme + BoardAccent.
 // =====================================================================
 
 class StarBoardPainter extends CustomPainter {
@@ -626,10 +822,14 @@ class StarBoardPainter extends CustomPainter {
   final Set<int> dests;
   final Move? hint;
   final List<int> animPath;
+  final int animSeg;
   final double animT;
   final int animHidden;
   final int shakeHole;
   final double shakeT;
+  final CcTheme theme;
+  final BoardAccent accent;
+  final String marbleStyle;
 
   StarBoardPainter({
     required this.board,
@@ -639,10 +839,14 @@ class StarBoardPainter extends CustomPainter {
     required this.dests,
     required this.hint,
     required this.animPath,
+    required this.animSeg,
     required this.animT,
     required this.animHidden,
     required this.shakeHole,
     required this.shakeT,
+    required this.theme,
+    required this.accent,
+    required this.marbleStyle,
   });
 
   static double _scale(Size size) =>
@@ -699,6 +903,7 @@ class StarBoardPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
+    final t = theme;
     final s = _scale(size);
     final r = s * 0.40;
 
@@ -709,17 +914,17 @@ class StarBoardPainter extends CustomPainter {
     canvas.drawRRect(
         trayRect,
         Paint()
-          ..shader = const LinearGradient(
+          ..shader = LinearGradient(
             begin: Alignment.topLeft,
             end: Alignment.bottomRight,
-            colors: [Color(0xFF3A1414), Color(0xFF220C0C)],
+            colors: [t.lacquerDeep, t.silk],
           ).createShader(Rect.fromLTWH(0, 0, size.width, size.height)));
     canvas.drawRRect(
         trayRect,
         Paint()
           ..style = PaintingStyle.stroke
           ..strokeWidth = 2
-          ..color = Imperial.goldOxidized.withValues(alpha: 0.9));
+          ..color = t.goldOxidized.withValues(alpha: 0.9));
 
     // Star plate.
     final outline = _starOutline(size);
@@ -727,10 +932,10 @@ class StarBoardPainter extends CustomPainter {
     canvas.drawPath(
         starPath,
         Paint()
-          ..shader = const LinearGradient(
+          ..shader = LinearGradient(
             begin: Alignment.topLeft,
             end: Alignment.bottomRight,
-            colors: [Imperial.cinnabar, Imperial.cinnabarDeep],
+            colors: [t.lacquer, t.lacquerDeep],
           ).createShader(starPath.getBounds()));
     // Warm key light from top-left: soft sheen across the plate.
     canvas.drawPath(
@@ -747,9 +952,9 @@ class StarBoardPainter extends CustomPainter {
     canvas.save();
     canvas.clipPath(starPath);
 
-    // Gold inlay grid lines between neighbors.
+    // Inlay grid lines between neighbors.
     final inlay = Paint()
-      ..color = Imperial.gold.withValues(alpha: 0.30)
+      ..color = accent.inlay.withValues(alpha: 0.30)
       ..strokeWidth = max(1.0, s * 0.035);
     for (int i = 0; i < board.holes.length; i++) {
       for (final nb in board.neighbors[i]) {
@@ -761,26 +966,26 @@ class StarBoardPainter extends CustomPainter {
 
     // Destination-arm washes (faint player-color tint on each home arm).
     for (int pi = 0; pi < players.length; pi++) {
-      final wash = Imperial.marbleBase[players[pi].seat]
-          .withValues(alpha: 0.14);
+      final wash =
+          t.marbles[players[pi].seat].withValues(alpha: 0.14);
       for (final h in board.armHoles(players[pi].destArm)) {
         canvas.drawCircle(
             _pos(board.holes[h], size), r * 1.25, Paint()..color = wash);
       }
     }
 
-    // Dimples: concave wells with gold rim crescent + qinghua hint.
+    // Dimples: concave wells with rim crescent + faint inlay motif.
     for (final h in board.holes) {
       _paintDimple(canvas, _pos(h, size), r);
     }
     canvas.restore();
-    // Star edge: gold stroke.
+    // Star edge: accent stroke.
     canvas.drawPath(
         starPath,
         Paint()
           ..style = PaintingStyle.stroke
           ..strokeWidth = 2.2
-          ..color = Imperial.gold.withValues(alpha: 0.85));
+          ..color = t.gold.withValues(alpha: 0.85));
 
     // Destination rings: thin antique-gold inlay rings (never neon dots).
     for (final d in dests) {
@@ -791,24 +996,25 @@ class StarBoardPainter extends CustomPainter {
           Paint()
             ..style = PaintingStyle.stroke
             ..strokeWidth = 2.2
-            ..color = Imperial.goldBright);
+            ..color = t.goldBright);
       canvas.drawCircle(
           p,
           r * 0.62,
           Paint()
             ..style = PaintingStyle.stroke
             ..strokeWidth = 5
-            ..color = Imperial.gold.withValues(alpha: 0.25));
+            ..color = t.gold.withValues(alpha: 0.25));
     }
 
     // Hint path.
     if (hint != null) {
-      final pulse = 0.5 + 0.5 * sin(DateTime.now().millisecondsSinceEpoch / 300);
+      final pulse =
+          0.5 + 0.5 * sin(DateTime.now().millisecondsSinceEpoch / 300);
       for (final h in hint!.path) {
         canvas.drawCircle(
             _pos(board.holes[h], size),
             r * (0.30 + 0.08 * pulse),
-            Paint()..color = Imperial.goldBright.withValues(alpha: 0.8));
+            Paint()..color = t.goldBright.withValues(alpha: 0.8));
       }
     }
 
@@ -822,40 +1028,38 @@ class StarBoardPainter extends CustomPainter {
       if (h.idx == selected) {
         scale = 1.14;
         lift = 1.0;
-        // Gold inlay ring under the lifted marble.
         canvas.drawCircle(
             p,
             r * 1.28,
             Paint()
               ..style = PaintingStyle.stroke
               ..strokeWidth = 2.4
-              ..color = Imperial.goldBright);
+              ..color = t.goldBright);
       }
       if (h.idx == shakeHole && shakeT > 0 && shakeT < 1) {
         p += Offset(sin(shakeT * pi * 5) * s * 0.10 * (1 - shakeT), 0);
       }
       _paintMarble(canvas, p, r * scale,
-          Imperial.marbleBase[players[pi].seat], lift);
+          t.marbles[players[pi].seat], lift);
     }
 
-    // Flying marble along the animation path.
-    if (animPath.length >= 2 && animT > 0) {
+    // Flying marble along the current animation segment.
+    if (animPath.length >= 2 && animSeg >= 0 && animT > 0) {
       final pos = _animPos(size, s);
       if (pos != null) {
         _paintMarble(canvas, pos.offset, r * (1 + 0.10 * pos.elev),
-            Imperial.marbleBase[players[pos.pi].seat], pos.elev,
+            t.marbles[players[pos.pi].seat], pos.elev,
             squash: pos.squash);
       }
     }
   }
 
   void _paintDimple(Canvas canvas, Offset p, double r) {
-    // Contact occlusion under the well.
+    final t = theme;
     canvas.drawCircle(
         p + Offset(r * 0.12, r * 0.18),
         r * 0.78,
         Paint()..color = Colors.black.withValues(alpha: 0.35));
-    // Concave well: dark inset.
     canvas.drawCircle(
         p,
         r * 0.72,
@@ -864,11 +1068,10 @@ class StarBoardPainter extends CustomPainter {
             center: const Alignment(0.35, 0.45),
             radius: 1.1,
             colors: [
-              const Color(0xFF1A0808),
-              const Color(0xFF3D1212),
+              t.silk.withValues(alpha: 0.85),
+              t.lacquerDeep,
             ],
           ).createShader(Rect.fromCircle(center: p, radius: r * 0.72)));
-    // Inset top-left shadow + bottom-right gold rim crescent.
     canvas.drawArc(
         Rect.fromCircle(center: p, radius: r * 0.72),
         pi * 0.9,
@@ -886,32 +1089,32 @@ class StarBoardPainter extends CustomPainter {
         Paint()
           ..style = PaintingStyle.stroke
           ..strokeWidth = r * 0.07
-          ..color = Imperial.gold.withValues(alpha: 0.55));
-    // Faint cobalt floral line drawing (20% opacity).
-    final floral = Imperial.cobalt.withValues(alpha: 0.20);
+          ..color = accent.rim.withValues(alpha: 0.55));
+    // Faint inlay line drawing (20% opacity).
+    final motif = accent.inlay.withValues(alpha: 0.20);
     canvas.drawCircle(
         p,
         r * 0.20,
         Paint()
           ..style = PaintingStyle.stroke
           ..strokeWidth = 1
-          ..color = floral);
+          ..color = motif);
     for (int i = 0; i < 4; i++) {
       final a = i * pi / 2 + pi / 4;
       canvas.drawCircle(
           p + Offset(cos(a) * r * 0.34, sin(a) * r * 0.34),
           r * 0.07,
-          Paint()..color = floral);
+          Paint()..color = motif);
     }
   }
 
   void _paintMarble(
       Canvas canvas, Offset p, double r, Color base, double lift,
       {double squash = 0}) {
-    // Soft contact shadow, growing with lift.
     canvas.drawOval(
         Rect.fromCenter(
-            center: p + Offset(r * 0.25 + lift * r * 0.5, r * (0.75 + lift * 0.9)),
+            center:
+                p + Offset(r * 0.25 + lift * r * 0.5, r * (0.75 + lift * 0.9)),
             width: r * (1.7 - lift * 0.4),
             height: r * (0.62 - lift * 0.14)),
         Paint()..color = Colors.black.withValues(alpha: 0.55 - lift * 0.15));
@@ -921,62 +1124,26 @@ class StarBoardPainter extends CustomPainter {
     canvas.save();
     canvas.translate(c.dx, c.dy);
     canvas.scale(sx, sy);
-    final dark = Imperial.marbleDark(base);
-    final light = Imperial.marbleLight(base);
-    canvas.drawCircle(
-        Offset.zero,
-        r,
-        Paint()
-          ..shader = RadialGradient(
-            center: const Alignment(-0.42, -0.48),
-            radius: 1.25,
-            colors: [light, base, dark],
-            stops: const [0.0, 0.45, 1.0],
-          ).createShader(Rect.fromCircle(center: Offset.zero, radius: r)));
-    // Hand-painted qinghua floral motif.
-    final motif = Imperial.motifOn(base).withValues(alpha: 0.8);
-    for (int i = 0; i < 5; i++) {
-      final a = i * 2 * pi / 5 - pi / 2;
-      canvas.drawCircle(
-          Offset(cos(a) * r * 0.36, sin(a) * r * 0.36),
-          r * 0.13,
-          Paint()..color = motif);
-    }
-    canvas.drawCircle(Offset.zero, r * 0.10, Paint()..color = motif);
-    // Crescent specular highlight, top-left (warm key light).
-    canvas.drawOval(
-        Rect.fromCenter(
-            center: Offset(-r * 0.34, -r * 0.40),
-            width: r * 0.52,
-            height: r * 0.32),
-        Paint()..color = Colors.white.withValues(alpha: 0.85));
-    canvas.drawOval(
-        Rect.fromCenter(
-            center: Offset(r * 0.30, r * 0.42),
-            width: r * 0.40,
-            height: r * 0.22),
-        Paint()..color = Colors.white.withValues(alpha: 0.12));
+    paintMarbleFace(canvas, Offset.zero, r, base, marbleStyle);
     canvas.restore();
   }
 
   _AnimPos? _animPos(Size size, double s) {
     if (animPath.length < 2) return null;
-    final segs = animPath.length - 1;
-    final total = animT * segs;
-    var seg = total.floor().clamp(0, segs - 1);
-    var lt = (total - seg).clamp(0.0, 1.0);
+    final seg = animSeg.clamp(0, animPath.length - 2);
+    final lt = animT.clamp(0.0, 1.0);
     // Last 12% of each hop is the landing squash.
     var squash = 0.0;
     if (lt > 0.88) squash = (lt - 0.88) / 0.12;
     final a = _pos(board.holes[animPath[seg]], size);
     final b = _pos(board.holes[animPath[seg + 1]], size);
     final isHop = (b - a).distance > s * 1.3;
-    final peak = (isHop ? s * 0.55 : s * 0.28) * sin(pi * lt.clamp(0.0, 1.0));
+    final peak = (isHop ? s * 0.55 : s * 0.28) * sin(pi * lt);
     final mid = (a + b) / 2 - Offset(0, peak * 2);
     final q0 = a + (mid - a) * lt;
     final q1 = mid + (b - mid) * lt;
     final pos = q0 + (q1 - q0) * lt;
-    final elev = sin(pi * lt.clamp(0.0, 1.0));
+    final elev = sin(pi * lt);
     final mover = holesState[animPath.first];
     return _AnimPos(
         offset: pos, elev: elev, squash: squash, pi: mover < 0 ? 0 : mover);

@@ -94,18 +94,14 @@ class Board {
     return -1;
   }
 
-  /// Unit-ish direction from a seat's start arm toward its destination arm,
-  /// used to measure forward progress.
+  /// Unit direction from a seat's start arm toward its destination arm,
+  /// used to measure forward progress. Destination arm = (seat + 3) % 6,
+  /// so the direction is the seat's own arm angle + 180 degrees.
+  /// Screen space: +x right, +y down. Arm angles: 0 top (-90), 1 upper-right
+  /// (-30), 2 lower-right (30), 3 bottom (90), 4 lower-left (150),
+  /// 5 upper-left (-150). Progress direction = arm angle + 180.
   Offset2 destDir(int seatArm) {
-    const deg = {
-      0: -90.0, // top -> bottom
-      1: 150.0, // upper-right -> lower-left
-      2: 30.0, // lower-right -> upper-left  (dest arm 5)
-      3: 90.0, // bottom -> top
-      4: -30.0, // lower-left -> upper-right (dest arm 1)
-      5: -150.0, // upper-left -> lower-right (dest arm 2)
-    };
-    final a = deg[seatArm]! * pi / 180.0;
+    final a = (-90.0 + 60.0 * seatArm + 180.0) * pi / 180.0;
     return Offset2(cos(a), sin(a));
   }
 

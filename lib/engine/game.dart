@@ -156,15 +156,21 @@ class GameState {
 
   void _extendChain(
       List<int> path, int pi, Set<int> dest, List<Move> out) {
+    // Holes the marble has already vacated this turn are EMPTY for the rest
+    // of the chain (the marble is conceptually at path.last). Without this,
+    // the generator could "hop over" its own trail — an illegal move that
+    // isLegalMove would later reject (RULES.md §5: hopping over an empty
+    // hole is illegal).
+    final trail = path.toSet();
     final from = path.last;
     for (final over in board.neighbors[from]) {
-      // The hole the marble is leaving counts as vacant for the hop-over check.
-      if (over == path.first) continue;
+      if (trail.contains(over)) continue; // vacated: empty, cannot hop over
       if (holes[over] == -1) continue;
       final land = board.hopLanding(from, over);
-      if (land == -1 || path.contains(land)) continue;
-      // Landing must be empty in the board with the moving marble removed.
-      if (holes[land] != -1 && land != path.first) continue;
+      if (land == -1 || trail.contains(land)) continue;
+      // Landing must be truly empty: trail holes are empty, board holes
+      // must be vacant.
+      if (holes[land] != -1) continue;
       final next = [...path, land];
       if (!_homeLockOk(next, pi, dest)) continue;
       out.add(Move(next));
@@ -303,6 +309,7 @@ class GameState {
       // No legal move: auto-skip (RULES.md §3/§12).
       consecutiveSkips++;
       totalTurns++;
+      turnsSinceDestEntry++; // a skipped turn enters no destination either
     }
     // Full round with nobody able to move -> draw.
     status = GameStatus.draw;
@@ -443,6 +450,24 @@ class GameState {
   String encode() => jsonEncode(toJson());
   static GameState decode(String s) =>
       fromJson(jsonDecode(s) as Map<String, dynamic>);
+
+  /// Fast structural clone for AI search. The board and competitor list are
+  /// immutable and shared; the mutable arrays are copied. History is not
+  /// needed for search and starts empty.
+  GameState cloneForSearch() {
+    final c = GameState._empty(board, players, forwardProgress);
+    c.holes = List<int>.from(holes);
+    c.turnIndex = turnIndex;
+    c.moveCounts = List<int>.from(moveCounts);
+    c.totalTurns = totalTurns;
+    c.turnsSinceDestEntry = turnsSinceDestEntry;
+    c.drawReason = drawReason;
+    c.status = status;
+    c.winnerIndex = winnerIndex;
+    c.consecutiveSkips = consecutiveSkips;
+    c.finishOrder.addAll(finishOrder);
+    return c;
+  }
 }
 
 class _Snapshot {
